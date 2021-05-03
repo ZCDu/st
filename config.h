@@ -5,7 +5,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char *font = "SauceCodePro Nerd Font Mono:pixelsize=20:antialias=true:autohint=true";
+static char *font = "SauceCodePro Nerd Font Mono:pixelsize=30:antialias=true:autohint=true";
 static int borderpx = 4;
 
 /*
@@ -185,7 +185,7 @@ static MouseShortcut mshortcuts[] = {
 };
 
 /* Internal keyboard shortcuts. */
-#define MODKEY Mod1Mask
+//#define MODKEY Mod1Mask
 #define AltMask Mod1Mask
 #define TERMMOD (ControlMask|ShiftMask)
 
