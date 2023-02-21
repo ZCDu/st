@@ -1,4 +1,6 @@
 /* See LICENSE for license details. */
+#include <X11/X.h>
+#include <X11/Xutil.h>
 #include <errno.h>
 #include <math.h>
 #include <limits.h>
@@ -15,7 +17,7 @@
 #include <X11/Xft/Xft.h>
 #include <X11/XKBlib.h>
 
-static char *argv0;
+char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
@@ -152,9 +154,10 @@ static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int)
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
-static void ximopen(Display *);
+static int ximopen(Display *);
 static void ximinstantiate(Display *, XPointer, XPointer);
 static void ximdestroy(XIM, XPointer, XPointer);
+static int xicdestroy(XIC, XPointer, XPointer);
 static void xinit(int, int);
 static void cresize(int, int);
 static void xresize(int, int);
@@ -176,6 +179,7 @@ static void kpress(XEvent *);
 static void cmessage(XEvent *);
 static void resize(XEvent *);
 static void focus(XEvent *);
+static uint buttonmask(unit);
 static int mouseaction(XEvent *, uint);
 static void brelease(XEvent *);
 static void bpress(XEvent *);
@@ -429,16 +433,29 @@ mousereport(XEvent *e)
 	ttywrite(buf, len, 0);
 }
 
+uint
+buttonmask(uint button)
+{
+  return button == Button1 ? Button1Mask
+    : button == Button2 ? Button2Mask
+    : button == Button3 ? Button3Mask
+    : button == Button4 ? Button4Mask
+    : button == Button5 ? Button5Mask
+    : 0;
+}
+
 int
 mouseaction(XEvent *e, uint release)
 {
 	MouseShortcut *ms;
 
+  /*ignore Button<N>mask for Button<N> - it's set on release */
+  uint state = e->xbutton.state & ~buttonmask(e->xbutton.button);
 	for (ms = mshortcuts; ms < mshortcuts + LEN(mshortcuts); ms++) {
 		if (ms->release == release &&
 		    ms->button == e->xbutton.button &&
-		    (match(ms->mod, e->xbutton.state) ||  /* exact or forced */
-		     match(ms->mod, e->xbutton.state & ~forcemousemod))) {
+		    (match(ms->mod, state) ||  /* exact or forced */
+		     match(ms->mod, state & ~forcemousemod))) {
 			ms->func(&(ms->arg));
 			return 1;
 		}
@@ -1062,33 +1079,37 @@ xunloadfonts(void)
 	xunloadfont(&dc.ibfont);
 }
 
-void
+int
 ximopen(Display *dpy)
 {
-	XIMCallback destroy = { .client_data = NULL, .callback = ximdestroy };
+	XIMCallback imdestroy = { .client_data = NULL, .callback = ximdestroy };
+	XIMCallback icdestroy = { .client_data = NULL, .callback = xicdestroy };
 
-	if ((xw.ime.xim = XOpenIM(xw.dpy, NULL, NULL, NULL)) == NULL) {
-		XSetLocaleModifiers("@im=local");
-		if ((xw.ime.xim = XOpenIM(xw.dpy, NULL, NULL, NULL)) == NULL) {
-			XSetLocaleModifiers("@im=");
-			if ((xw.ime.xim = XOpenIM(xw.dpy, NULL, NULL, NULL)) == NULL)
-				die("XOpenIM failed. Could not open input device.\n");
-		}
-	}
-	if (XSetIMValues(xw.ime.xim, XNDestroyCallback, &destroy, NULL) != NULL)
-		die("XSetIMValues failed. Could not set input method value.\n");
-	xw.ime.xic = XCreateIC(xw.ime.xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
-				XNClientWindow, xw.win, XNFocusWindow, xw.win, NULL);
-	if (xw.ime.xic == NULL)
-		die("XCreateIC failed. Could not obtain input method.\n");
+  xw.ime.xim = XOpenIM(xw.dpy, NULL, NULL, NULL);
+  if (xw.ime.xim == NULL)
+    return 0;
+  if (XSetIMValues(xw.ime.xim, XNDestroyCallback, &imdestroy, NULL))
+    fprintf(stderr, "XSetIMValues: Could not set XNDestroyCallback.\n");
+
   xw.ime.spotlist = XVaCreateNestedList(0, XNSpotLocation, &xw.ime.spot, NULL);
+
+  if (xw.ime.xic == NULL) {
+    xw.ime.xic = XCreateIC(xw.ime.xim, XNInputStyle,
+                          XIMPreeditNothing | XIMStatusNothing,
+                          XNClientWindow, xw.win,
+                          XNDestroyCallback, &icdestroy,
+                          NULL);
+  }
+  if (xw.ime.xic == NULL)
+    fprintf(stderr, "XCreateIC: Could not create input context.\n");
+  return 1;
 }
 
 void
 ximinstantiate(Display *dpy, XPointer client, XPointer call)
 {
-	ximopen(dpy);
-	XUnregisterIMInstantiateCallback(xw.dpy, NULL, NULL, NULL,
+	if (ximopen(dpy))
+    XUnregisterIMInstantiateCallback(xw.dpy, NULL, NULL, NULL,
 					ximinstantiate, NULL);
 }
 
@@ -1096,10 +1117,15 @@ void
 ximdestroy(XIM xim, XPointer client, XPointer call)
 {
 	xw.ime.xim = NULL;
-  xw.ime.xic = NULL;
 	XRegisterIMInstantiateCallback(xw.dpy, NULL, NULL, NULL,
 					ximinstantiate, NULL);
   XFree(xw.ime.spotlist);
+}
+
+int xicdestroy(XIC xim, XPointer client, XPointer call)
+{
+  xw.ime.xic = NULL;
+  return 1;
 }
 
 void
@@ -1175,7 +1201,9 @@ xinit(int cols, int rows)
 	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
 
 	/* input methods */
-	ximopen(xw.dpy);
+	if (!ximopen(xw.dpy)) {
+    XRegisterIMInstantiateCallback(xw.dpy, NULL, NULL, NULL, ximinstantiate, NULL);
+  }
 
 	/* white cursor, black outline */
 	xw.pointerisvisible = 1;
@@ -1853,7 +1881,10 @@ kpress(XEvent *ev)
 	if (IS_SET(MODE_KBDLOCK))
 		return;
 
-	len = XmbLookupString(xw.ime.xic, e, buf, sizeof buf, &ksym, &status);
+  if (xw.ime.xic)
+    len = XmbLookupString(xw.ime.xic, e, buf, sizeof buf, &ksym, &status);
+  else
+    len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
 	if (IS_SET(MODE_NORMAL)) {
 		kpressNormalMode(buf, strlen(buf),
 				ksym == XK_Escape, ksym == XK_Return, ksym == XK_BackSpace);
